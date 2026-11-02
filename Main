@@ -1,0 +1,299 @@
+import java.util.Scanner;
+
+/**
+ * Automated Teller Machine - cash dispenser with denomination logic.
+ *
+ * Features:
+ *  - Denominations: Rs.2000, Rs.500, Rs.200, Rs.100
+ *  - Dispenses the minimum number of notes, respecting the notes actually
+ *    available in the machine (bounded dynamic programming, so it stays
+ *    correct even when a denomination runs low)
+ *  - Validations: invalid amount, multiples of 100, per-transaction limit,
+ *    insufficient account balance, insufficient ATM cash / unavailable notes
+ *  - Console menu: check balance, deposit, withdraw, exit
+ *
+ * Compile: javac -encoding UTF-8 AutomatedTellerMachine.java
+ * Run:     java AutomatedTellerMachine
+ */
+public class AutomatedTellerMachine {
+
+    // ---------------------------------------------------------------- config
+    // Uses the rupee sign only if the console can display it; otherwise "Rs."
+    // (avoids "?" or garbled characters on consoles that are not UTF-8).
+    private static final String CURRENCY = detectCurrencySymbol();
+
+    private static String detectCurrencySymbol() {
+        try {
+            String enc = System.getProperty("stdout.encoding");
+            if (enc == null) enc = System.getProperty("sun.stdout.encoding");
+            if (enc == null) enc = java.nio.charset.Charset.defaultCharset().name();
+            if (java.nio.charset.Charset.forName(enc).newEncoder().canEncode('\u20B9')) {
+                return "\u20B9";
+            }
+        } catch (Exception ignored) {
+            // fall through to ASCII fallback
+        }
+        return "Rs.";
+    }
+    private static final int[] DENOMINATIONS = {2000, 500, 200, 100};
+    private static final int MIN_UNIT = 100;
+    private static final long PER_TRANSACTION_LIMIT = 50_000;
+
+    // ---------------------------------------------------------------- helper: account
+    static class Account {
+        private final String holderName;
+        private long balance;
+
+        Account(String holderName, long openingBalance) {
+            this.holderName = holderName;
+            this.balance = openingBalance;
+        }
+
+        String getHolderName() { return holderName; }
+        long getBalance()      { return balance; }
+
+        void deposit(long amount)  { balance += amount; }
+        void withdraw(long amount) { balance -= amount; }
+    }
+
+    // ---------------------------------------------------------------- helper: cash dispenser
+    static class CashDispenser {
+        private final int[] denominations;
+        private final int[] noteCount; // notes currently loaded, parallel to denominations
+
+        CashDispenser(int[] denominations, int[] initialCounts) {
+            this.denominations = denominations.clone();
+            this.noteCount = initialCounts.clone();
+        }
+
+        long totalCash() {
+            long total = 0;
+            for (int i = 0; i < denominations.length; i++) {
+                total += (long) denominations[i] * noteCount[i];
+            }
+            return total;
+        }
+
+        void addNotes(int denomination, int count) {
+            for (int i = 0; i < denominations.length; i++) {
+                if (denominations[i] == denomination) {
+                    noteCount[i] += count;
+                    return;
+                }
+            }
+        }
+
+        /**
+         * Computes the minimum-note combination for the amount using only the
+         * notes available in the machine. Returns an array parallel to
+         * denominations, or null if the amount cannot be formed.
+         * Does NOT modify the inventory.
+         */
+        int[] computeNotes(long amount) {
+            int units = (int) (amount / MIN_UNIT);
+            int n = denominations.length;
+            final int INF = Integer.MAX_VALUE / 2;
+
+            // dp[i][u] = min notes to form u units using the first i denominations
+            int[][] dp = new int[n + 1][units + 1];
+            int[][] choice = new int[n + 1][units + 1]; // notes of denomination i-1 used
+            for (int u = 1; u <= units; u++) dp[0][u] = INF;
+
+            for (int i = 1; i <= n; i++) {
+                int unitValue = denominations[i - 1] / MIN_UNIT;
+                int maxNotes = noteCount[i - 1];
+                for (int u = 0; u <= units; u++) {
+                    dp[i][u] = INF;
+                    for (int k = 0; k <= maxNotes && k * unitValue <= u; k++) {
+                        int prev = dp[i - 1][u - k * unitValue];
+                        if (prev + k < dp[i][u]) {
+                            dp[i][u] = prev + k;
+                            choice[i][u] = k;
+                        }
+                    }
+                }
+            }
+
+            if (dp[n][units] >= INF) return null;
+
+            int[] result = new int[n];
+            int u = units;
+            for (int i = n; i >= 1; i--) {
+                int k = choice[i][u];
+                result[i - 1] = k;
+                u -= k * (denominations[i - 1] / MIN_UNIT);
+            }
+            return result;
+        }
+
+        /** Removes the given notes from the machine's inventory. */
+        void dispense(int[] notes) {
+            for (int i = 0; i < notes.length; i++) noteCount[i] -= notes[i];
+        }
+
+        int[] getDenominations() { return denominations; }
+        int[] getNoteCounts()    { return noteCount; }
+    }
+
+    // ---------------------------------------------------------------- ATM logic
+    private final Account account;
+    private final CashDispenser dispenser;
+
+    public AutomatedTellerMachine(Account account, CashDispenser dispenser) {
+        this.account = account;
+        this.dispenser = dispenser;
+    }
+
+    private static String money(long amount) {
+        return CURRENCY + String.format("%,d", amount);
+    }
+
+    public void checkBalance() {
+        System.out.println("\nAccount holder : " + account.getHolderName());
+        System.out.println("Available balance: " + money(account.getBalance()));
+    }
+
+    public void deposit(long amount) {
+        if (amount <= 0) {
+            System.out.println("Invalid amount. Deposit must be greater than zero.");
+            return;
+        }
+        account.deposit(amount);
+        System.out.println("Deposited " + money(amount) + " successfully.");
+        System.out.println("New balance: " + money(account.getBalance()));
+    }
+
+    public void withdraw(long amount) {
+        // 1. Amount validation
+        if (amount <= 0) {
+            System.out.println("Invalid amount. Please enter a positive amount.");
+            return;
+        }
+        if (amount % MIN_UNIT != 0) {
+            System.out.println("Invalid amount. Please enter a multiple of " + money(MIN_UNIT) + ".");
+            return;
+        }
+        if (amount > PER_TRANSACTION_LIMIT) {
+            System.out.println("Amount exceeds the per-transaction limit of "
+                    + money(PER_TRANSACTION_LIMIT) + ".");
+            return;
+        }
+
+        // 2. Account balance check
+        if (amount > account.getBalance()) {
+            System.out.println("Insufficient account balance. Available: "
+                    + money(account.getBalance()));
+            return;
+        }
+
+        // 3. ATM cash check
+        if (amount > dispenser.totalCash()) {
+            System.out.println("Insufficient cash in ATM. Please try a smaller amount.");
+            return;
+        }
+
+        // 4. Denomination check (enough total cash, but can the exact amount be formed?)
+        int[] notes = dispenser.computeNotes(amount);
+        if (notes == null) {
+            System.out.println("Unable to dispense this exact amount with the notes currently "
+                    + "available. Please try a different amount.");
+            return;
+        }
+
+        // 5. Commit the transaction
+        dispenser.dispense(notes);
+        account.withdraw(amount);
+
+        System.out.println("\nPlease collect your cash: " + money(amount));
+        int[] dens = dispenser.getDenominations();
+        int totalNotes = 0;
+        for (int i = 0; i < dens.length; i++) {
+            if (notes[i] > 0) {
+                System.out.printf("  %s%-5d x %d = %s%n", CURRENCY, dens[i], notes[i],
+                        money((long) dens[i] * notes[i]));
+                totalNotes += notes[i];
+            }
+        }
+        System.out.println("  Total notes dispensed: " + totalNotes);
+        System.out.println("Remaining balance: " + money(account.getBalance()));
+    }
+
+    /** Admin-style view of the machine's loaded cash (shown from the menu). */
+    public void showAtmCashStatus() {
+        int[] dens = dispenser.getDenominations();
+        int[] counts = dispenser.getNoteCounts();
+        System.out.println("\nATM cash status:");
+        for (int i = 0; i < dens.length; i++) {
+            System.out.printf("  %s%-5d : %d notes%n", CURRENCY, dens[i], counts[i]);
+        }
+        System.out.println("  Total cash in ATM: " + money(dispenser.totalCash()));
+    }
+
+    // ---------------------------------------------------------------- console I/O
+    private static long readAmount(Scanner sc, String prompt) {
+        System.out.print(prompt);
+        if (!sc.hasNextLine()) return -1;
+        String line = sc.nextLine().trim().replace(",", "");
+        try {
+            return Long.parseLong(line);
+        } catch (NumberFormatException e) {
+            return -1; // treated as invalid by the callers
+        }
+    }
+
+    private static void printMenu() {
+        System.out.println("\n========== ATM MENU ==========");
+        System.out.println("1. Check Balance");
+        System.out.println("2. Deposit Cash");
+        System.out.println("3. Withdraw Cash");
+        System.out.println("4. ATM Cash Status");
+        System.out.println("5. Exit");
+        System.out.println("==============================");
+        System.out.print("Choose an option: ");
+    }
+
+    public static void main(String[] args) {
+        // Opening state: account with Rs.25,000 and an ATM loaded with notes
+        Account account = new Account("Customer", 25_000);
+        CashDispenser dispenser = new CashDispenser(
+                DENOMINATIONS,
+                new int[]{10, 20, 30, 50}); // 2000s, 500s, 200s, 100s
+        AutomatedTellerMachine atm = new AutomatedTellerMachine(account, dispenser);
+
+        Scanner sc = new Scanner(System.in);
+        System.out.println("Welcome to the Automated Teller Machine");
+
+        boolean running = true;
+        while (running) {
+            printMenu();
+            if (!sc.hasNextLine()) break; // end of input
+            String choice = sc.nextLine().trim();
+
+            switch (choice) {
+                case "1":
+                    atm.checkBalance();
+                    break;
+                case "2": {
+                    long amt = readAmount(sc, "Enter deposit amount: " + CURRENCY);
+                    atm.deposit(amt);
+                    break;
+                }
+                case "3": {
+                    long amt = readAmount(sc, "Enter withdrawal amount: " + CURRENCY);
+                    atm.withdraw(amt);
+                    break;
+                }
+                case "4":
+                    atm.showAtmCashStatus();
+                    break;
+                case "5":
+                    running = false;
+                    System.out.println("Thank you for using our ATM. Goodbye!");
+                    break;
+                default:
+                    System.out.println("Invalid option. Please choose 1-5.");
+            }
+        }
+        sc.close();
+    }
+}
